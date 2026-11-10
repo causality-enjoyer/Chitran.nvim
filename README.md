@@ -3,8 +3,10 @@
 Dump the current Neovim buffer, unformatted, into a new browser tab.
 
 ## Build
-    pnpm install
-    pnpm build
+```sh
+pnpm install
+pnpm build
+```
 
 ## Install (lazy.nvim)
 ```lua

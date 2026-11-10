@@ -1,26 +1,56 @@
 import http from "node:http";
+import { handleCursorRoute } from "./cursor.js";
 
 const PORT = Number(process.env.CHITRAN_PORT ?? 8765);
 const MAX_BODY = 10 * 1024 * 1024;
 
-// id -> { name, text}
+// id -> { name, text }
 const docs = new Map<string, { name: string; text: string }>();
 
 const escapeHtml = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-const page = (name: string, text: string) => `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>${escapeHtml(name)}</title>
-  </head>
+const renderRaw = (text: string) =>
+  text
+    .split("\n")
+    .map(
+      (l, i) =>
+        `<div class="l" data-line="${i + 1}">${escapeHtml(l) || "&nbsp;"}</div>`,
+    )
+    .join("");
 
-  <body>
-    <pre style="white-space: pre-wrap; word-break: break-word">
-			${escapeHtml(text)}
-		</pre>
-  </body>
+const page = (id: string, name: string, text: string) => `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>${escapeHtml(name)}</title>
+<style>
+  body { font-family: ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
+  .l.cur { background: rgba(255, 200, 0, .18); box-shadow: -3px 0 0 #fc0; }
+</style>
+</head>
+<body>
+${renderRaw(text)}
+<script>
+  const BUF = ${JSON.stringify(id)};
+  let current = null;
+  const es = new EventSource("/events/" + BUF);
+  es.addEventListener("cursor", (e) => {
+    const { line } = JSON.parse(e.data);
+    let el = null;
+    for (let n = line; n >= 1 && !el; n--) el = document.querySelector('[data-line="' + n + '"]');
+    if (!el) return;
+    current?.classList.remove("cur");
+    el.classList.add("cur");
+    current = el;
+    const r = el.getBoundingClientRect();
+    const h = window.innerHeight;
+    if (r.top < h * 0.25 || r.bottom > h * 0.75) {
+      el.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  });
+</script>
+</body>
 </html>
 `;
 
@@ -37,7 +67,6 @@ function readBody(req: http.IncomingMessage): Promise<string> {
       }
       chunks.push(c);
     });
-
     req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     req.on("error", reject);
   });
@@ -48,6 +77,8 @@ const server = http.createServer(async (req, res) => {
   const parts = url.pathname.split("/").filter(Boolean);
 
   try {
+    if (handleCursorRoute(req, res)) return;
+
     if (req.method === "GET" && url.pathname === "/health") {
       res.writeHead(200, { "content-type": "text/plain" }).end("ok");
       return;
@@ -71,7 +102,7 @@ const server = http.createServer(async (req, res) => {
       }
       res
         .writeHead(200, { "content-type": "text/html; charset=utf-8" })
-        .end(page(doc.name, doc.text));
+        .end(page(parts[1], doc.name, doc.text));
       return;
     }
 

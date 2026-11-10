@@ -4,6 +4,12 @@ end
 
 vim.g.loaded_chitran = true
 
-vim.api.nvim_create_user_command("ChitranOpen", function()
+local cmd = vim.api.nvim_create_user_command
+
+cmd("ChitranOpen", function()
 	require("Chitran").open()
 end, { desc = "Dump current buffer into a browser tab" })
+
+cmd("ChitranStopSync", function()
+	require("Chitran").stop_sync()
+end, { desc = "Stop cursor sync for this buffer" })
