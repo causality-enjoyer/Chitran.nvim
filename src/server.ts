@@ -1,58 +1,46 @@
 import http from "node:http";
 import { handleCursorRoute } from "./cursor.js";
+import template from "./template.html";
 
 const PORT = Number(process.env.CHITRAN_PORT ?? 8765);
 const MAX_BODY = 10 * 1024 * 1024;
+const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`]);
+const ID_RE = /^[\w-]+$/;
 
-// id -> { name, text }
-const docs = new Map<string, { name: string; text: string }>();
+type Doc = { name: string; text: string; twoWay: boolean };
+const docs = new Map<string, Doc>();
 
 const escapeHtml = (s: string) =>
-  s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 
-const renderRaw = (text: string) =>
-  text
-    .split("\n")
+// Neovim pushes text ending in "\n"; dropping last one so we don't invent a line.
+const toLines = (t: string) => t.replace(/\r?\n$/, "").split("\n");
+
+const renderRaw = (lines: string[]) =>
+  lines
     .map(
       (l, i) =>
         `<div class="l" data-line="${i + 1}">${escapeHtml(l) || "&nbsp;"}</div>`,
     )
     .join("");
 
-const page = (id: string, name: string, text: string) => `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<title>${escapeHtml(name)}</title>
-<style>
-  body { font-family: ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; }
-  .l.cur { background: rgba(255, 200, 0, .18); box-shadow: -3px 0 0 #fc0; }
-</style>
-</head>
-<body>
-${renderRaw(text)}
-<script>
-  const BUF = ${JSON.stringify(id)};
-  let current = null;
-  const es = new EventSource("/events/" + BUF);
-  es.addEventListener("cursor", (e) => {
-    const { line } = JSON.parse(e.data);
-    let el = null;
-    for (let n = line; n >= 1 && !el; n--) el = document.querySelector('[data-line="' + n + '"]');
-    if (!el) return;
-    current?.classList.remove("cur");
-    el.classList.add("cur");
-    current = el;
-    const r = el.getBoundingClientRect();
-    const h = window.innerHeight;
-    if (r.top < h * 0.25 || r.bottom > h * 0.75) {
-      el.scrollIntoView({ block: "center", behavior: "smooth" });
-    }
+// Single-pass substitution: inserted content is never re-scanned for placeholders.
+function fill(tpl: string, vars: Record<string, string>): string {
+  return tpl.replace(/\{\{(\w+)\}\}/g, (_, k: string) => vars[k] ?? "");
+}
+
+const page = (id: string, doc: Doc) =>
+  fill(template, {
+    TITLE: escapeHtml(doc.name),
+    BUF: escapeHtml(id),
+    TWO_WAY: doc.twoWay ? "1" : "0",
+    LAST: String(toLines(doc.text).length),
+    BODY: renderRaw(toLines(doc.text)),
   });
-</script>
-</body>
-</html>
-`;
 
 function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -77,6 +65,19 @@ const server = http.createServer(async (req, res) => {
   const parts = url.pathname.split("/").filter(Boolean);
 
   try {
+    // we accept only requests from our host
+    if (!ALLOWED_HOSTS.has(req.headers.host ?? "")) {
+      res.writeHead(403).end();
+      return;
+    }
+
+    // Block cross-site POSTs: a custom header is a good protection as it forces a CORS preflight
+    // which the server never grants.
+    if (req.method === "POST" && req.headers["x-chitran"] !== "1") {
+      res.writeHead(403).end();
+      return;
+    }
+
     if (handleCursorRoute(req, res)) return;
 
     if (req.method === "GET" && url.pathname === "/health") {
@@ -84,10 +85,22 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // Shutdown using custom header
+    if (req.method === "POST" && url.pathname === "/shutdown") {
+      res.writeHead(204).end(() => process.exit(0));
+      return;
+    }
+
     if (req.method === "POST" && parts[0] === "push" && parts[1]) {
+      if (!ID_RE.test(parts[1])) {
+        res.writeHead(400).end();
+        return;
+      }
+
       const text = await readBody(req);
       const name = url.searchParams.get("name") || `buffer ${parts[1]}`;
-      docs.set(parts[1], { name, text });
+      const twoWay = url.searchParams.get("two_way") === "1";
+      docs.set(parts[1], { name, text, twoWay });
       res.writeHead(204).end();
       return;
     }
@@ -101,14 +114,21 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       res
-        .writeHead(200, { "content-type": "text/html; charset=utf-8" })
-        .end(page(parts[1], doc.name, doc.text));
+        .writeHead(200, {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+        })
+        .end(page(parts[1], doc));
       return;
     }
 
     res.writeHead(404, { "content-type": "text/plain" }).end("not found");
   } catch (err) {
-    res.writeHead(500, { "content-type": "text/plain" }).end(String(err));
+    if (res.headersSent) return;
+    const tooBig = err instanceof Error && err.message === "body too large";
+    res
+      .writeHead(tooBig ? 413 : 500, { "content-type": "text/plain" })
+      .end(String(err));
   }
 });
 

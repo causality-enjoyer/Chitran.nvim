@@ -13,3 +13,7 @@ end, { desc = "Dump current buffer into a browser tab" })
 cmd("ChitranStopSync", function()
 	require("Chitran").stop_sync()
 end, { desc = "Stop cursor sync for this buffer" })
+
+cmd("ChitranClose", function()
+	require("Chitran").close()
+end, { desc = "Stop sync and shut down the Chitran daemon" })

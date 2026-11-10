@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+
+    <title>{{TITLE}}</title>
+
+    <style>
+      body {
+        font-family: ui-monospace, monospace;
+        margin: 1rem;
+      }
+      .l {
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .l.cur {
+        background: rgba(255, 200, 0, 0.18);
+        box-shadow: -3px 0 0 #fc0;
+      }
+    </style>
+  </head>
+
+  <body data-buf="{{BUF}}" data-two-way="{{TWO_WAY}}" data-last="{{LAST}}">
+    {{BODY}}
+    <script>
+      (() => {
+        const { buf, twoWay, last } = document.body.dataset;
+        const TWO_WAY = twoWay === "1";
+        const LAST = Number(last);
+        let current = null;
+        let currentLine = null;
+
+        // Nearest rendered line at or before `line` (same fallback the real renderer will need).
+        function lineEl(line) {
+          for (let n = line; n >= 1; n--) {
+            const el = document.querySelector('[data-line="' + n + '"]');
+            if (el) return el;
+          }
+          return null;
+        }
+
+        function mark(line, behavior) {
+          const el = lineEl(line);
+          if (!el) return;
+          currentLine = line;
+          current?.classList.remove("cur");
+          el.classList.add("cur");
+          current = el;
+          const r = el.getBoundingClientRect();
+          const h = window.innerHeight;
+          if (r.top < h * 0.25 || r.bottom > h * 0.75) {
+            el.scrollIntoView({ block: "center", behavior });
+          }
+        }
+
+        function firstVisibleLine() {
+          for (const el of document.querySelectorAll("[data-line]")) {
+            if (el.getBoundingClientRect().top >= 0)
+              return Number(el.dataset.line);
+          }
+          return 1;
+        }
+
+        // nvim -> browser
+        const es = new EventSource("/events/" + buf);
+        es.addEventListener("cursor", (e) =>
+          mark(JSON.parse(e.data).line, "smooth"),
+        );
+
+        // browser -> nvim
+        if (TWO_WAY) {
+          document.addEventListener("keydown", (e) => {
+            if (e.ctrlKey || e.metaKey || e.altKey) return;
+            if (
+              e.target instanceof HTMLElement &&
+              e.target.closest("input, textarea, [contenteditable]")
+            )
+              return;
+            if (e.key !== "j" && e.key !== "k") return;
+
+            let next;
+            if (currentLine == null)
+              next = firstVisibleLine(); // first press places the cursor
+            else next = currentLine + (e.key === "j" ? 1 : -1);
+            next = Math.max(1, Math.min(LAST, next));
+            if (next === currentLine) return;
+
+            mark(next, "auto");
+            fetch("/browser-cursor/" + buf + "?line=" + next, {
+              method: "POST",
+              headers: { "x-chitran": "1" },
+              keepalive: true,
+            });
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>
